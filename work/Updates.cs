@@ -1,0 +1,29 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Net;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+
+static class Updates {
+ public const string Repository="peppabaoyu/THANKS";
+ public static string Current {get{return Assembly.GetExecutingAssembly().GetName().Version.ToString(3);}}
+ internal sealed class Release {public string Version,Url,Hash;}
+ sealed class Client:WebClient {protected override WebRequest GetWebRequest(Uri address){var request=base.GetWebRequest(address);request.Timeout=20000;return request;}}
+ static Client Connect(){ServicePointManager.SecurityProtocol|=SecurityProtocolType.Tls12;var client=new Client();client.Headers[HttpRequestHeader.UserAgent]="XieXie/"+Current;client.Headers[HttpRequestHeader.Accept]="application/vnd.github+json";return client;}
+ internal static Release Parse(string json){var obj=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json);if((bool)obj["draft"]||(bool)obj["prerelease"])return null;string tag=(string)obj["tag_name"];Version version;if(!Version.TryParse(tag.TrimStart('v'),out version))throw new InvalidDataException("版本号格式不正确");if(version<=new Version(Current))return null;foreach(var item in (System.Collections.IEnumerable)obj["assets"]){var asset=(Dictionary<string,object>)item;if((string)asset["name"]!="XieXie-Setup.exe")continue;string url=(string)asset["browser_download_url"];object digest;string hash=asset.TryGetValue("digest",out digest)?digest as string:null;if(!url.StartsWith("https://github.com/"+Repository+"/releases/download/",StringComparison.Ordinal)||hash==null||!Regex.IsMatch(hash,"^sha256:[a-fA-F0-9]{64}$"))throw new InvalidDataException("更新文件地址或校验信息不完整，请在 GitHub Releases 检查发布附件。");return new Release{Version=version.ToString(),Url=url,Hash=hash.Substring(7)};}throw new InvalidDataException("新版尚未提供 XieXie-Setup.exe，请稍后检查。");}
+ static async Task<Release> Latest(){using(var client=Connect()){return Parse(await client.DownloadStringTaskAsync("https://api.github.com/repos/"+Repository+"/releases/latest"));}}
+ public static async void Automatic(Form owner,string directory){if(File.Exists(Path.Combine(directory,"disable-auto-update")))return;try{var release=await Latest();if(release==null||owner.IsDisposed)return;if(MessageBox.Show(owner,"发现歇歇 "+release.Version+"，查看并安装更新吗？","有新版本",MessageBoxButtons.YesNo,MessageBoxIcon.Information)==DialogResult.Yes)Show(owner,directory,release);}catch{/* Offline or no release: manual check provides details. */}}
+ public static void Show(Form owner,string directory){Show(owner,directory,null);}
+ static void Show(Form owner,string directory,Release known){using(var form=new Form{Text="歇歇更新 · "+Current,Font=new Font("Microsoft YaHei UI",10),StartPosition=FormStartPosition.CenterParent,ClientSize=new Size(570,320),AutoScroll=true,AutoScaleMode=AutoScaleMode.Dpi,AutoScaleDimensions=new SizeF(96,96),MinimumSize=new Size(400,260)}){
+ var panel=new FlowLayoutPanel{Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(20)};var status=new Label{Text="当前版本 "+Current+"\n更新来源：github.com/"+Repository,AutoSize=true,MaximumSize=new Size(510,0)};panel.Controls.Add(status);var auto=new CheckBox{Text="启动时自动检查更新（安装前会询问）",AutoSize=true,Checked=!File.Exists(Path.Combine(directory,"disable-auto-update")),Margin=new Padding(3,15,3,10)};auto.CheckedChanged+=(s,e)=>{try{Directory.CreateDirectory(directory);string path=Path.Combine(directory,"disable-auto-update");if(auto.Checked){if(File.Exists(path))File.Delete(path);}else File.WriteAllText(path,"");}catch{MessageBox.Show(form,"未能保存更新设置，请检查文件夹写入权限。");}};panel.Controls.Add(auto);var check=new Button{Text="检查更新",AutoSize=true,Padding=new Padding(10,5,10,5)};var install=new Button{Text="下载并安装新版",AutoSize=true,Padding=new Padding(10,5,10,5),Enabled=known!=null};Release available=known;if(known!=null)status.Text="发现新版 "+known.Version+"，可下载安装。";
+ check.Click+=async(s,e)=>{check.Enabled=false;install.Enabled=false;status.Text="正在连接 GitHub…";try{available=await Latest();if(form.IsDisposed)return;status.Text=available==null?"已是最新版本 "+Current:"发现新版 "+available.Version;install.Enabled=available!=null;}catch(Exception ex){if(!form.IsDisposed)status.Text="暂时无法检查更新。仓库未发布首个版本或网络无法连接时会出现此提示。\n"+ex.Message;}finally{if(!form.IsDisposed)check.Enabled=true;}};
+ install.Click+=async(s,e)=>{if(available==null)return;install.Enabled=check.Enabled=false;string file=null;try{status.Text="正在下载并校验，请稍候…";string folder=Path.Combine(directory,"updates");Directory.CreateDirectory(folder);file=Path.Combine(folder,"XieXie-Setup-"+Guid.NewGuid().ToString("N")+".exe");using(var client=Connect())await client.DownloadFileTaskAsync(available.Url,file);using(var stream=File.OpenRead(file))using(var sha=SHA256.Create()){string actual=BitConverter.ToString(sha.ComputeHash(stream)).Replace("-","");if(!actual.Equals(available.Hash,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("文件校验失败，已取消安装。");}if(form.IsDisposed)return;status.Text="校验通过。";if(MessageBox.Show(form,"安装将保存记录并关闭当前歇歇，然后启动新版。继续吗？","安装更新",MessageBoxButtons.YesNo)==DialogResult.Yes){Process.Start(new ProcessStartInfo(file){UseShellExecute=true});form.Close();}}catch(Exception ex){if(!form.IsDisposed)status.Text="未能安装："+ex.Message;if(file!=null&&File.Exists(file))try{File.Delete(file);}catch{}}finally{if(!form.IsDisposed){check.Enabled=true;install.Enabled=true;}}};
+ var page=new LinkLabel{Text="打开 GitHub 发布页面",AutoSize=true,Margin=new Padding(3,12,3,3)};page.LinkClicked+=(s,e)=>Process.Start("https://github.com/"+Repository+"/releases");panel.Controls.Add(check);panel.Controls.Add(install);panel.Controls.Add(page);form.Controls.Add(panel);form.ShowDialog(owner);}}
+}

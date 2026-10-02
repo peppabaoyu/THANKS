@@ -1,0 +1,7 @@
+dist/
+work/*.exe
+work/*.exe.config
+work/release-portable/
+work/qa*/
+*.user
+*.suo

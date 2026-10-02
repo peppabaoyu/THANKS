@@ -1,0 +1,44 @@
+name: Build and release XieXie
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read version and validate tag
+        shell: pwsh
+        run: |
+          $source = Get-Content work/AppVersion.cs -Raw
+          $match = [regex]::Match($source, 'AssemblyVersion\("(\d+\.\d+\.\d+)\.0"\)')
+          if (!$match.Success) { throw 'Invalid version in AppVersion.cs' }
+          $tag = 'v' + $match.Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne $tag) { throw 'Tag must match AppVersion.cs' }
+          "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+      - name: Build installer and portable package
+        shell: pwsh
+        run: ./work/build-release.ps1 -Destination ./dist
+      - name: Test app and verify installer contents
+        shell: pwsh
+        run: |
+          $qa = Join-Path $env:RUNNER_TEMP 'xiexie-qa'
+          $process = Start-Process -FilePath ./work/XieXie-next.exe -ArgumentList @('--self-test', $qa) -PassThru
+          if (!$process.WaitForExit(120000)) { $process.Kill(); throw 'Tests timed out' }
+          if ($process.ExitCode -ne 0 -or (Test-Path "$qa/FAILED.txt")) { if (Test-Path "$qa/FAILED.txt") { Get-Content "$qa/FAILED.txt" }; throw 'Tests failed' }
+          Get-Content "$qa/tests.txt"
+          $verify = Join-Path $env:RUNNER_TEMP 'xiexie-payload'
+          $setup = Start-Process -FilePath ./dist/XieXie-Setup.exe -ArgumentList @('--verify', $verify) -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw 'Installer verification failed' }
+          if ((Get-FileHash "$verify/歇歇.exe").Hash -ne (Get-FileHash ./work/XieXie-next.exe).Hash) { throw 'Installer payload mismatch' }
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create $env:RELEASE_TAG ./dist/XieXie-Setup.exe ./dist/XieXie-Portable.zip ./dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title "歇歇 $env:RELEASE_TAG" --generate-notes --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
